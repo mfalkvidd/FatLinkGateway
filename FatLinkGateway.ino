@@ -1,3 +1,12 @@
+/* Dependencies:
+   Radiohead: www.airspayce.com/mikem/arduino/RadioHead/
+   Syslog: https://github.com/arcao/Syslog/
+*/
+
+extern "C" {
+#include "user_interface.h"
+}
+
 #define SYSLOG syslog
 #include "settings.h"
 
@@ -49,6 +58,10 @@ void setup()
   Serial.print("Connecting to ");
   Serial.println(MY_ESP8266_SSID);
 
+  WiFi.mode(WIFI_STA);
+  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
+  WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
+
   WiFi.begin(MY_ESP8266_SSID, MY_ESP8266_PASSWORD);
 
   while (WiFi.status() != WL_CONNECTED) {
@@ -72,10 +85,9 @@ void setup()
     SYSLOG.log(LOG_INFO, "setFrequency failed");
     delay(5000);
   }
-  SYSLOG.logf(LOG_INFO, "Set Freq to %i kHz", RFM_FREQ*1000);
 
   radio.setModemConfig(modem_config);
-  radio.setTxPower(20);
+  radio.setTxPower(23);
   SYSLOG.log(LOG_INFO, "Setup finished");
 }
 
@@ -89,13 +101,19 @@ void loop()
     send_beacon();
     lastSend = millis();
   }
+  delay(100); // Give the ESP chance to enter low power mode
 }
 
 void send_beacon() {
+#ifndef SEND_BEACON
+  return;
+#endif
   char data[] = "Beacon";
+  unsigned long start_send = millis();
   radio.send((uint8_t *)data, strlen(data));
   SYSLOG.log(LOG_INFO, data);
   radio.waitPacketSent();
+  SYSLOG.logf(LOG_INFO, "Packet send took %u ms", millis() - start_send);
 }
 
 void set_led(bool state) {
@@ -113,20 +131,23 @@ void check_incoming() {
     {
       set_led(HIGH);
       RH_RF95::printBuffer("Received: ", buf, len);
+      buf[len] = '\0';
       SYSLOG.log(LOG_INFO, "Got: ");
       SYSLOG.log(LOG_INFO, (char*)buf);
       SYSLOG.logf(LOG_INFO, "RSSI: %i", radio.lastRssi());
       SYSLOG.logf(LOG_INFO, "SNR: %i", radio.lastSNR());
       // TODO: Parse message (gps coords, etc)
 
+#ifdef SEND_REPLY
       // Send a reply
       char data[PAYLOADSIZE];
       snprintf(data, PAYLOADSIZE, "RSSI: %i SNR: %i, freqErr: %i", radio.lastRssi(), radio.lastSNR(), radio.frequencyError());
 
+      unsigned long start_send = millis();
       radio.send((uint8_t *)data, strlen(data));
       radio.waitPacketSent();
-      SYSLOG.log(LOG_INFO, "Sent a reply:");
-      SYSLOG.log(LOG_INFO, data);
+      SYSLOG.logf(LOG_INFO, "Packet send took %u ms", millis() - start_send);
+#endif
       set_led(LOW);
       //TODO: log to pubnub
     }
