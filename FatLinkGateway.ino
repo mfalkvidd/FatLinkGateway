@@ -7,7 +7,10 @@ extern "C" {
 #include "user_interface.h"
 }
 
-#define SYSLOG syslog
+//#define SYSLOG syslog
+#define SEND_REPLY
+//#define SEND_BEACON
+#define FLASHLOG
 #include "settings.h"
 
 #include <ESP8266WiFi.h>
@@ -34,7 +37,39 @@ RH_RF95 radio(RFM_CS, RFM_INT);
 #define APP_NAME "FatLink"
 WiFiUDP udpClient;
 Syslog syslog(udpClient, SYSLOG_SERVER, SYSLOG_PORT, DEVICE_HOSTNAME, APP_NAME, LOG_KERN);
-#else
+#endif
+
+#ifdef FLASHLOG
+#define SYSLOG flashlog
+#define FLASH_LOGFILE "/log.txt"
+#include <ESP8266WebServer.h>
+#include <FS.h>
+File f;
+ESP8266WebServer server(80);
+class Flashlog {
+  public:
+    //void log(uint16_t pri, const __FlashStringHelper *message) {}
+    //void log(uint16_t pri, const String &message) {}
+    void log(uint16_t pri, const char *message) {
+      f.print(millis());
+      f.print(" ");
+      f.println(message);
+    }
+    void logf(uint16_t pri, const char *fmt, ...) __attribute__((format(printf, 3, 4))) {
+      char buff[512];
+      va_list args;
+      va_start(args, fmt);
+      vsnprintf(buff, sizeof(buff), fmt, args);
+      va_end(args);
+      f.print(millis());
+      f.print(" ");
+      f.println(buff);
+    }
+};
+Flashlog flashlog;
+#endif
+
+#ifndef SYSLOG
 #define SYSLOG none
 class None {
   public:
@@ -55,6 +90,42 @@ void setup()
   Serial.begin(115200);
   Serial.println("in setup");
 
+#ifdef FLASHLOG
+  if (!SPIFFS.begin()) {
+    Serial.println("SPIFFS begin failed");
+  }
+  f = SPIFFS.open(FLASH_LOGFILE, "a");
+  if (!f) {
+    Serial.println("file open failed");
+  }
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(MY_ESP8266_AP_SSID, MY_ESP8266_AP_PASSWORD);
+
+  IPAddress myIP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(myIP);
+  server.on("/", []() {
+    String s = "<html><body><a href=\"";
+    s += FLASH_LOGFILE;
+    s += "\"> size: ";
+    s += f.size();
+    s += "</a></body></html>";
+    server.send(200, "text/html", s);
+  });
+  server.on("/delete", []() {
+    f.close();
+    SPIFFS.remove(FLASH_LOGFILE);
+    f = SPIFFS.open(FLASH_LOGFILE, "a");
+    server.send(200, "text/plain", "File deleted");
+  });
+  server.onNotFound([]() {
+    if (!handleFileRead(server.uri()))
+      server.send(404, "text/plain", "FileNotFound");
+  });
+  server.begin();
+#endif
+
+#ifdef CONNECT_WIFI
   Serial.print("Connecting to ");
   Serial.println(MY_ESP8266_SSID);
 
@@ -73,6 +144,7 @@ void setup()
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
+#endif
 
   SYSLOG.log(LOG_INFO, "FatLink GW starting up");
   while (!radio.init()) {
@@ -101,6 +173,9 @@ void loop()
     send_beacon();
     lastSend = millis();
   }
+#ifdef FLASHLOG
+  server.handleClient();
+#endif
   delay(100); // Give the ESP chance to enter low power mode
 }
 
@@ -248,4 +323,38 @@ void demoData() {
   Serial.println(payload);
   publishPositionToPubNub(payload);
 }
+
+#ifdef FLASHLOG
+String getContentType(String filename) {
+  if (server.hasArg("download")) return "application/octet-stream";
+  else if (filename.endsWith(".htm")) return "text/html";
+  else if (filename.endsWith(".html")) return "text/html";
+  else if (filename.endsWith(".css")) return "text/css";
+  else if (filename.endsWith(".js")) return "application/javascript";
+  else if (filename.endsWith(".png")) return "image/png";
+  else if (filename.endsWith(".gif")) return "image/gif";
+  else if (filename.endsWith(".jpg")) return "image/jpeg";
+  else if (filename.endsWith(".ico")) return "image/x-icon";
+  else if (filename.endsWith(".xml")) return "text/xml";
+  else if (filename.endsWith(".pdf")) return "application/x-pdf";
+  else if (filename.endsWith(".zip")) return "application/x-zip";
+  else if (filename.endsWith(".gz")) return "application/x-gzip";
+  return "text/plain";
+}
+
+bool handleFileRead(String path) {
+  if (path.endsWith("/")) path += "index.htm";
+  String contentType = getContentType(path);
+  String pathWithGz = path + ".gz";
+  if (SPIFFS.exists(pathWithGz) || SPIFFS.exists(path)) {
+    if (SPIFFS.exists(pathWithGz))
+      path += ".gz";
+    File file = SPIFFS.open(path, "r");
+    size_t sent = server.streamFile(file, contentType);
+    file.close();
+    return true;
+  }
+  return false;
+}
+#endif
 
